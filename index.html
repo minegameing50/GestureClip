@@ -57,13 +57,18 @@ header{flex-shrink:0;height:50px;display:flex;align-items:center;padding:0 14px;
   padding:2px 7px;border-radius:100px;border:1px solid rgba(168,85,247,.22);
   color:var(--pu);background:rgba(168,85,247,.06)}
  
-/* Editor wrapper — relative for drop highlight, NOT overflow:hidden so cursor shows */
+/* Editor wrapper — relative for drop highlight */
 #ed-wrap{flex:1;position:relative}
-#ed-wrap.over{outline:2px dashed rgba(0,229,176,.3)}
-#ed-wrap.over::after{content:'↓ Drop here';position:absolute;bottom:0;left:0;right:0;
-  text-align:center;padding:4px;font-family:'Share Tech Mono',monospace;font-size:.6rem;
-  letter-spacing:.09em;color:rgba(0,229,176,.4);background:rgba(0,229,176,.04);
-  border-top:1px dashed rgba(0,229,176,.16)}
+#ed-wrap.over{outline:2px solid rgba(168,85,247,.5);background:rgba(168,85,247,.03)}
+#ed-wrap.over::after{
+  content:'📌 Drop to insert at cursor';
+  position:absolute;bottom:0;left:0;right:0;
+  text-align:center;padding:5px;
+  font-family:'Share Tech Mono',monospace;font-size:.6rem;letter-spacing:.09em;
+  color:rgba(168,85,247,.8);background:rgba(168,85,247,.08);
+  border-top:1px solid rgba(168,85,247,.25);
+  pointer-events:none;
+}
 #ed{position:absolute;inset:0;resize:none;background:transparent;border:none;outline:none;
   color:var(--tx);font-family:'DM Sans',sans-serif;font-size:.88rem;line-height:1.82;
   padding:16px 18px;caret-color:var(--g);z-index:1}
@@ -551,15 +556,34 @@ function makeCard(item){
   const card=document.createElement('div');
   const isMe=item.device===deviceId;
   card.className='card'; card.dataset.id=item.id; card.draggable=true;
-  card.innerHTML='<div class="dh">⠿</div>'+
+  card.innerHTML='<div class="dh">⠿ drag</div>'+
     '<div class="ctxt">'+esc(item.text)+'</div>'+
     '<div class="cmeta"><span class="cdev'+(isMe?'':' remote')+'">'+(isMe?'💻 this device':'📡 remote')+'</span>'+
     '<span class="ctime">'+tstr(item.ts)+'</span></div>'+
     '<div class="cacts">'+
     '<button class="ca cag" onclick="pasteItem(\''+item.id+'\')">↓ Paste</button>'+
     '<button class="ca car" onclick="deleteItem(\''+item.id+'\')">✕</button></div>';
-  card.addEventListener('dragstart',e=>{ e.dataTransfer.setData('text/plain',item.text); card.classList.add('dragging'); });
-  card.addEventListener('dragend',()=>card.classList.remove('dragging'));
+ 
+  card.addEventListener('dragstart', e => {
+    e.dataTransfer.setData('text/plain', item.text);
+    e.dataTransfer.effectAllowed = 'copy';
+    // Custom drag image — a small ghost label
+    const ghost = document.createElement('div');
+    ghost.style.cssText = `
+      position:fixed;top:-999px;left:-999px;
+      background:rgba(14,20,38,.97);border:1.5px solid var(--pu);
+      border-radius:8px;padding:6px 12px;
+      font-family:'DM Sans',sans-serif;font-size:.78rem;color:#cce4f5;
+      max-width:200px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+      box-shadow:0 6px 24px rgba(0,0,0,.5);
+    `;
+    ghost.textContent = item.text.slice(0, 32) + (item.text.length > 32 ? '…' : '');
+    document.body.appendChild(ghost);
+    e.dataTransfer.setDragImage(ghost, 60, 20);
+    setTimeout(() => ghost.remove(), 100);
+    card.classList.add('dragging');
+  });
+  card.addEventListener('dragend', () => card.classList.remove('dragging'));
   return card;
 }
 function pasteItem(id){ const item=items[id]; if(item) pasteToEditor(item.text); }
@@ -575,21 +599,90 @@ function clearAll(){
   items={}; cardsEl.querySelectorAll('.card').forEach(c=>c.remove()); renderEmpty();
 }
  
-// drag & drop (mouse)
-edWrap.addEventListener('dragover',e=>{e.preventDefault();edWrap.classList.add('over')});
-edWrap.addEventListener('dragleave',()=>edWrap.classList.remove('over'));
-edWrap.addEventListener('drop',e=>{
-  e.preventDefault(); edWrap.classList.remove('over');
-  const t=e.dataTransfer.getData('text/plain'); if(t) pasteToEditor(t);
+// drag & drop (mouse) — insert at exact drop pixel
+edWrap.addEventListener('dragover', e => {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'copy';
+  edWrap.classList.add('over');
+  // Show a live caret position while hovering
+  const pos = getCaretPosFromPoint(e.clientX, e.clientY);
+  if (pos >= 0) { ed.focus(); ed.setSelectionRange(pos, pos); }
+});
+edWrap.addEventListener('dragleave', () => edWrap.classList.remove('over'));
+edWrap.addEventListener('drop', e => {
+  e.preventDefault();
+  edWrap.classList.remove('over');
+  const text = e.dataTransfer.getData('text/plain');
+  if (!text) return;
+  const pos = getCaretPosFromPoint(e.clientX, e.clientY);
+  insertAtPos(text, pos);
 });
  
-function pasteToEditor(text){
-  const s=ed.selectionStart??ed.value.length, e2=ed.selectionEnd??s;
-  ed.value=ed.value.substring(0,s)+text+ed.value.substring(e2);
-  ed.selectionStart=ed.selectionEnd=s+text.length; ed.focus();
-  edWrap.style.background='rgba(168,85,247,.04)';
-  setTimeout(()=>edWrap.style.background='',500);
-  toast('✋ Pasted!','tpu');
+// ── Get textarea char offset from screen pixel coords ──
+function getCaretPosFromPoint(x, y) {
+  // Modern: document.caretPositionFromPoint (Firefox)
+  if (document.caretPositionFromPoint) {
+    const pos = document.caretPositionFromPoint(x, y);
+    if (pos && pos.offsetNode === ed || pos?.offsetNode?.parentElement === ed) {
+      return pos.offset;
+    }
+  }
+  // Webkit: document.caretRangeFromPoint (Chrome/Safari)
+  if (document.caretRangeFromPoint) {
+    const range = document.caretRangeFromPoint(x, y);
+    if (range) {
+      // Works when drop target is the textarea itself
+      ed.focus();
+      ed.dispatchEvent(new MouseEvent('click', { bubbles:true, cancelable:true, clientX:x, clientY:y }));
+      return ed.selectionStart;
+    }
+  }
+  // Fallback: manual line/char math
+  return computeCaretPos(x, y);
+}
+ 
+// ── Manual caret position from pixel coords (fallback) ──
+function computeCaretPos(x, y) {
+  const r  = ed.getBoundingClientRect();
+  const cs = window.getComputedStyle(ed);
+  const fs = parseFloat(cs.fontSize)   || 14;
+  const lh = parseFloat(cs.lineHeight) || fs * 1.82;
+  const pt = parseFloat(cs.paddingTop)    || 16;
+  const pl = parseFloat(cs.paddingLeft)   || 18;
+  const cw = fs * 0.54;
+  const lines = ed.value.split('\n');
+  const relY  = Math.max(0, y - r.top  - pt);
+  const relX  = Math.max(0, x - r.left - pl);
+  const li = Math.max(0, Math.min(lines.length - 1, Math.floor(relY / lh)));
+  const ci = Math.max(0, Math.min(lines[li].length, Math.round(relX / cw)));
+  let pos = 0;
+  for (let i = 0; i < li; i++) pos += lines[i].length + 1;
+  return pos + ci;
+}
+ 
+// ── Insert text at specific char position ──
+function insertAtPos(text, pos) {
+  const safePos = (pos >= 0 && pos <= ed.value.length) ? pos : ed.value.length;
+  const before = ed.value.substring(0, safePos);
+  const after  = ed.value.substring(safePos);
+  ed.value = before + text + after;
+  ed.selectionStart = ed.selectionEnd = safePos + text.length;
+  ed.focus();
+  // Flash the editor border briefly
+  edWrap.style.outline = '2px solid rgba(168,85,247,.5)';
+  setTimeout(() => edWrap.style.outline = '', 400);
+  toast('📌 Dropped at cursor!', 'tpu');
+}
+ 
+function pasteToEditor(text) {
+  const s  = ed.selectionStart ?? ed.value.length;
+  const e2 = ed.selectionEnd   ?? s;
+  ed.value = ed.value.substring(0, s) + text + ed.value.substring(e2);
+  ed.selectionStart = ed.selectionEnd = s + text.length;
+  ed.focus();
+  edWrap.style.outline = '2px solid rgba(168,85,247,.4)';
+  setTimeout(() => edWrap.style.outline = '', 400);
+  toast('✋ Pasted!', 'tpu');
 }
  
 // ════════════════════════════════════════════════════════════
@@ -777,18 +870,19 @@ function moveDrag(x,y){
   dragGhost.style.left=x+'px'; dragGhost.style.top=y+'px';
 }
 function dropDrag(x, y){
-  const item=gDragId?items[gDragId]:null;
+  const item = gDragId ? items[gDragId] : null;
   dragGhost.classList.remove('show');
-  if(item){
-    const r=ed.getBoundingClientRect();
-    if(x>=r.left&&x<=r.right&&y>=r.top&&y<=r.bottom){
-      placeCaretAt(x,y); pasteToEditor(item.text);
-      toast('✌️ Dropped!','ty2'); ripple();
+  if (item) {
+    const r = ed.getBoundingClientRect();
+    if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {
+      const pos = computeCaretPos(x, y);
+      insertAtPos(item.text, pos);
+      toast('✌️ Dropped!', 'ty2'); ripple();
     } else {
-      toast('Move hand over editor then open','ty2');
+      toast('Move hand over editor then open', 'ty2');
     }
   }
-  gDragId=null; gDragging=false;
+  gDragId = null; gDragging = false;
 }
  
 // ════════════════════════════════════════
